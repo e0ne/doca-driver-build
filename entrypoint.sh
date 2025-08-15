@@ -185,10 +185,38 @@ function ubuntu_install_prerequisites() {
     debug_print "Function: ${FUNCNAME[0]}"
 
     if [[ -n "${UBUNTU_PRO_TOKEN}" ]]; then
+        # Configure apt to use different SSL options
+#        exec_cmd "echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99ssl-verify"
+#        exec_cmd "echo 'Acquire::https::Verify-Host "false";' >> /etc/apt/apt.conf.d/99ssl-verify"
+#        exec_cmd "apt-get update -o Acquire::https::Verify-Peer=false"
+        
+        # Force urandom usage for SSL/TLS to fix "Insufficient randomness" error
+#        exec_cmd "ln -sf /dev/urandom /dev/random"
+#        exec_cmd "ln -sf /dev/urandom /dev/hwrng"
+        
+        # Set essential SSL environment variables
+#        export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+#        export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+#        export RANDFILE=/dev/urandom
+        
+        # Generate entropy manually to fix SSL/TLS issues
+        timestamp_print "Generating entropy to fix SSL/TLS issues..."
+        exec_cmd "dd if=/dev/urandom of=/dev/null bs=1M count=100 2>/dev/null &"
+        exec_cmd "sleep 5"
+        
         exec_cmd "apt update"
-        exec_cmd "apt install -y ubuntu-advantage-tools"
-        exec_cmd "pro attach ${UBUNTU_PRO_TOKEN}"
-        exec_cmd "pro enable fips-updates --assume-yes"
+        exec_cmd "apt install -y ubuntu-advantage-tools ca-certificates kmod iproute2 ethtool jq"
+        exec_cmd "update-ca-certificates"
+        
+        # Try pro attach with SSL fixes
+        #exec_cmd "pro attach ${UBUNTU_PRO_TOKEN}"
+        
+        # Try to enable FIPS if pro attach succeeded
+       # if command -v pro >/dev/null 2>&1; then
+            exec_cmd "pro enable fips-updates --assume-yes" #|| {
+        #        timestamp_print "Failed to enable FIPS updates, continuing without FIPS"
+        #    }
+        #fi
     fi
 
     if [[ ${FULL_KVER} =~ "realtime" ]]; then
