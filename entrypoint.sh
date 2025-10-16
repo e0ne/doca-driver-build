@@ -32,7 +32,7 @@
 : ${UNLOAD_STORAGE_MODULES:=false}
 : ${CREATE_IFNAMES_UDEV:=false}
 : ${ENABLE_NFSRDMA:=false}
-: ${RESTORE_DRIVER_ON_POD_TERMINATION:=false}
+: ${RESTORE_DRIVER_ON_POD_TERMINATION:=true}
 
 : ${ENTRYPOINT_DEBUG:=false}
 : ${DEBUG_LOG_FILE:=/tmp/entrypoint_debug_cmds.log}
@@ -212,13 +212,13 @@ function redhat_fetch_major_ver() {
         eval local $(cat ${host_os_info_file} | grep ^ID=)
         eval local $(cat ${host_os_info_file} | grep ^VERSION_ID=)
         eval local $(cat ${host_os_info_file} | grep ^RHEL_VERSION=)
-        eval $(cat ${host_os_info_file} | grep ^OPENSHIFT_VERSION=)
 
         if [ "${ID}" = "rhcos" ]; then
             OPENSHIFT_VERSION=${VERSION_ID:-4.9}
         elif [ "${ID}" = "rhel" ]; then
             RHEL_VERSION=${VERSION_ID:-8.4}
         else
+            eval local $(cat ${host_os_info_file} | grep ^VERSION_ID=)
             RHEL_VERSION=${VERSION_ID:-8.4}
         fi
         RHEL_MAJOR_VERSION=${RHEL_VERSION%%.*}
@@ -328,14 +328,15 @@ function dtk_ocp_setup_driver_build() {
     debug_print "Function: ${FUNCNAME[0]}"
 
     timestamp_print "Copy required files to shared dir with OCP DTK"
-    exec_cmd "cp -r ${NVIDIA_NIC_DRIVER_PATH} ${DTK_OCP_NIC_SHARED_DIR}/"
+    exec_cmd "mkdir -p ${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}/"
+    exec_cmd "cp -r ${NVIDIA_NIC_DRIVER_PATH} ${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}/"
 
     exec_cmd "sed -i '/append_driver_build_flags=/c\append_driver_build_flags=\"${append_driver_build_flags}\"' ${DTK_OCP_BUILD_SCRIPT}"
     exec_cmd "sed -i '/DTK_OCP_COMPILED_DRIVER_VER=/c\DTK_OCP_COMPILED_DRIVER_VER=${NVIDIA_NIC_DRIVER_VER}' ${DTK_OCP_BUILD_SCRIPT}"
     exec_cmd "sed -i '/DTK_OCP_START_COMPILE_FLAG=/c\DTK_OCP_START_COMPILE_FLAG=${DTK_OCP_START_COMPILE_FLAG}' ${DTK_OCP_BUILD_SCRIPT}"
     exec_cmd "sed -i '/DTK_OCP_DONE_COMPILE_FLAG=/c\DTK_OCP_DONE_COMPILE_FLAG=${DTK_OCP_DONE_COMPILE_FLAG}' ${DTK_OCP_BUILD_SCRIPT}"
 
-    exec_cmd "cp ${DTK_OCP_BUILD_SCRIPT} ${DTK_OCP_NIC_SHARED_DIR}/"
+    exec_cmd "cp ${DTK_OCP_BUILD_SCRIPT} ${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}/"
 
     exec_cmd "touch ${DTK_OCP_START_COMPILE_FLAG}"
     debug_print "Start compile flag is set at: ${DTK_OCP_START_COMPILE_FLAG}"
@@ -344,7 +345,8 @@ function dtk_ocp_setup_driver_build() {
 function dtk_ocp_finalize_driver_build() {
     debug_print "Function: ${FUNCNAME[0]}"
 
-    rpms_path="${DTK_OCP_NIC_SHARED_DIR}/MLNX_OFED_SRC-${NVIDIA_NIC_DRIVER_VER}/RPMS/redhat-release-*/${ARCH}/"
+    exec_cmd "mkdir -p ${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}"
+    rpms_path="${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}/MLNX_OFED_SRC-${NVIDIA_NIC_DRIVER_VER}/RPMS/redhat-release-*/${ARCH}/"
 
     debug_print "Storing driver rpms from ${rpms_path} to ${driver_inventory_path}"
     exec_cmd "cp -rf ${rpms_path}/*.rpm ${driver_inventory_path}/"
@@ -1236,60 +1238,19 @@ function unload_blocking_modules() {
 function prepare_gcc() {
     debug_print "Function: ${FUNCNAME[0]}"
 
-    # Skip GCC setup for RHCOS/OpenShift
-    if [[ ! -z ${OPENSHIFT_VERSION} ]]; then
-        debug_print "RHCOS detected (OpenShift version: ${OPENSHIFT_VERSION}), skipping GCC setup"
-        return 0
-    fi
-
     ALT_GCC_PRIO=200
     proc_version=$(cat /proc/version)
-    # Example outputs:
-    # Ubuntu: Linux version 6.6.87.1-microsoft-standard-WSL2 (root@af282157c79e) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Mon Apr 21 17:08:54 UTC 2025
-    # SLES: Linux version 6.4.0-150600.21-default (geeko@buildhost) (gcc (SUSE Linux) 7.5.0, GNU ld (GNU Binutils; SUSE Linux Enterprise 15) 2.41.0.20230908-150100.7.46) #1 SMP PREEMPT_DYNAMIC Thu May 16 11:09:22 UTC 2024 (36c1e09)
-    # RHEL: Linux version 5.14.0-570.12.1.el9_6.x86_64 (mockbuild@x86-64-03.build.eng.rdu2.redhat.com) (gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5), GNU ld version 2.35.2-63.el9) #1 SMP PREEMPT_DYNAMIC Fri Apr 4 10:41:31 EDT 2025
-    
-    # Extract GCC version - flexible regex to catch anything between "gcc" and version number
-    gcc_version=$(echo "${proc_version}" | grep -oiE 'gcc[^0-9]*[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    kernel_gcc_ver=$(echo ${proc_version} | grep -o 'gcc-[0-9]*')
 
     debug_print "/proc/version: ${proc_version}"
 
-    if [ ! -z "${gcc_version}" ]; then
-        # Extract major version number (e.g., "11" from "11.2.0")
-        gcc_major_ver=$(echo "${gcc_version}" | cut -d. -f1)
+    if [ ! -z "${kernel_gcc_ver}" ]; then
+        debug_print "Kernel compiled with ${kernel_gcc_ver}"
 
-        debug_print "Kernel compiled with GCC version ${gcc_version} (major: ${gcc_major_ver})"
-
-        if ${IS_OS_UBUNTU}; then
-            kernel_gcc_ver="gcc-${gcc_major_ver}"
-            exec_cmd "apt-get -yq update; apt-get -yq install ${kernel_gcc_ver}"
-            gcc_binary="/usr/bin/${kernel_gcc_ver}"
-        elif ${IS_OS_SLES}; then
-            kernel_gcc_ver_package="gcc${gcc_major_ver}"
-            kernel_gcc_ver_bin="gcc-${gcc_major_ver}"
-            exec_cmd "zypper --non-interactive install --no-recommends ${kernel_gcc_ver_package}"
-            gcc_binary="/usr/bin/${kernel_gcc_ver_bin}"
-        else
-            # RedHat/CentOS/Fedora using dnf - try gcc-toolset first, fallback to default
-            if dnf list available "gcc-toolset-${gcc_major_ver}" &>/dev/null; then
-                # gcc-toolset version is available
-                kernel_gcc_ver="gcc-toolset-${gcc_major_ver}-gcc"
-                exec_cmd "dnf -q -y install gcc-toolset-${gcc_major_ver}"
-                gcc_binary="/opt/rh/gcc-toolset-${gcc_major_ver}/root/usr/bin/gcc"
-            else
-                # Fall back to default gcc package
-                debug_print "gcc-toolset-${gcc_major_ver} not available, using default gcc package"
-                kernel_gcc_ver="gcc"
-                exec_cmd "dnf -q -y install gcc"
-                gcc_binary="/usr/bin/gcc"
-            fi
-        fi
-
-        exec_cmd "update-alternatives --install /usr/bin/gcc gcc ${gcc_binary} ${ALT_GCC_PRIO}"
+        exec_cmd "apt-get -yq update; apt-get -yq install ${kernel_gcc_ver}"
+        exec_cmd "update-alternatives --install /usr/bin/gcc gcc /usr/bin/${kernel_gcc_ver} ${ALT_GCC_PRIO}"
 
         timestamp_print "Set ${kernel_gcc_ver} for driver compilation, matching kernel compiled version"
-    else
-        debug_print "Could not extract GCC version from /proc/version"
     fi
 }
 
@@ -1313,18 +1274,6 @@ function print_loaded_drv_ver_str() {
     fi
 }
 
-function update_ca_certificates() {
-    if ${IS_OS_UBUNTU}; then
-        timestamp_print "Updating system CA certificates (Ubuntu)..."
-
-        if command -v update-ca-certificates >/dev/null 2>&1; then
-            exec_cmd "update-ca-certificates || true"
-        else
-            timestamp_print "[WARN] update-ca-certificates not found"
-        fi
-    fi
-}
-
 ############################## Exec start #####################################
 if ${ENTRYPOINT_DEBUG}; then
     set -x
@@ -1342,8 +1291,8 @@ RHEL_MAJOR_VERSION=0
 OPENSHIFT_VERSION=""
 
 DTK_OCP_BUILD_SCRIPT="/root/dtk_nic_driver_build.sh"
-DTK_OCP_START_COMPILE_FLAG=${DTK_OCP_NIC_SHARED_DIR}/dtk_start_compile
-DTK_OCP_DONE_COMPILE_FLAG_PREFIX=${DTK_OCP_NIC_SHARED_DIR}/dtk_done_compile_
+DTK_OCP_START_COMPILE_FLAG=${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}/dtk_start_compile
+DTK_OCP_DONE_COMPILE_FLAG_PREFIX=${DTK_OCP_NIC_SHARED_DIR}/${FULL_KVER}/dtk_done_compile_
 DTK_OCP_DONE_COMPILE_FLAG=""
 
 VENDOR=0x15b3
@@ -1381,9 +1330,7 @@ elif ${IS_OS_SLES}; then
     debug_print "OS is SLES"
 else
     debug_print "OS is Red Hat"
-    redhat_fetch_major_ver
 fi
-update_ca_certificates
 
 debug_print "[os-release]: "$(cat /etc/os-release)
 debug_print "[uname -a]: "$(uname -a)
@@ -1416,8 +1363,7 @@ case "$@" in
 
     debug_print "Drivers sources path: ${NVIDIA_NIC_DRIVER_PATH}"
 
-    # install gcc matching kernel compiled version
-    prepare_gcc
+    # prepare_gcc TODO fix function to support all platforms
 
     build_src=true
 
